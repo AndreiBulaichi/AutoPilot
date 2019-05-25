@@ -1,12 +1,12 @@
 # AutoPilot
 
-Build steps : 
+Build steps : \n 
 
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j10 autopilot
+mkdir build && cd build \n
+cmake -DCMAKE_BUILD_TYPE=Release .. \n
+make -j10 autopilot \n
 
-Run : 
+Run : \n
 
-cd <arch>/Release
+cd <arch>/Release \n
 ./autopilot
