@@ -1,0 +1,40 @@
+item {
+  label: 0
+  name: "none"
+  display_name: "background"
+}
+item {
+  label: 1
+  name: "speed_limit_30"
+  display_name: "speed_limit_30"
+}
+item {
+  label: 2
+  name: "speed_limit_50"
+  display_name: "speed_limit_50"
+}
+item {
+  label: 3
+  name: "priority_road"
+  display_name: "priority_road"
+}
+item {
+  label: 4
+  name: "give_way"
+  display_name: "give_way"
+}
+item {
+  label: 5
+  name: "stop"
+  display_name: "stop"
+}
+item {
+  label: 6
+  name: "traffic_light_red"
+  display_name: "traffic_light_red"
+}
+item {
+  label: 7
+  name: "traffic_light_green"
+  display_name: "traffic_light_green"
+}
