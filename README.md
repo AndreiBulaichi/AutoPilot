@@ -10,6 +10,6 @@ make -j10 autopilot
 
 Run :
 
-cd <arch>/Release
+cd _arch_/Release
   
 ./autopilot
