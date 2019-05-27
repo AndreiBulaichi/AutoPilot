@@ -24,13 +24,12 @@
 using namespace InferenceEngine;
 
 cv::VideoCapture cap(0);
-const size_t width  = (size_t) cap.get(cv::CAP_PROP_FRAME_WIDTH);
-const size_t height = (size_t) cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+size_t width;
+size_t height;
 cv::Mat frame(height, width, CV_8UC3);
 
 mutex frameMtx;
 mutex imShowMtx;
-
 
 int main()
 {
@@ -39,9 +38,11 @@ int main()
         return -1;
     }
 
-    // if size is updated need also to update global sizes
     // cap.set(cv::CAP_PROP_FRAME_WIDTH, 320);
     // cap.set(cv::CAP_PROP_FRAME_HEIGHT, 240);
+
+    width = (size_t) cap.get(cv::CAP_PROP_FRAME_WIDTH);
+    height = (size_t) cap.get(cv::CAP_PROP_FRAME_HEIGHT);
 
     std::cout << cv::getBuildInformation() << std::endl;
     std::cout << "InferenceEngine: " << GetInferenceEngineVersion() << std::endl;
@@ -50,11 +51,13 @@ int main()
     std::thread showFrameTh(showFrame);
     std::thread detectLanesTh(detectLanes);
     std::thread detectCarsTh(detectCars);
+    // std::thread arduinoI2CTh(arduinoI2C);
 
     getFrameTh.join();
     showFrameTh.join();
     detectLanesTh.join();
     detectCarsTh.join();
+    // arduinoI2CTh.join();
 
     atexit(exitRoutine);
     return 0;
@@ -152,6 +155,9 @@ void detectLanes()
 void detectCars()
 {
     cv::Mat frameCpy(height, width, CV_8UC3);
+
+    std::string networkPath = "../../../models/pedestrian_and_vehicles/origin/mobilenet_iter_73000.xml";
+    constexpr float confidenceThreshold = 0.5f;
 
     try {
     // --------------------------- 1. Load Plugin for inference engine -------------------------------------

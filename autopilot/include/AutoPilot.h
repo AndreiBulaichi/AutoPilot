@@ -16,9 +16,7 @@
 #define SPEED_VALUE_FLAG 	(uint8_t) 0xA1
 #define DIR_VALUE_FLAG 		(uint8_t) 0xB2
 
-std::string networkPath = "../../../models/pedestrian_and_vehicles/origin/mobilenet_iter_73000.xml";
 std::string deviceName = "MYRIAD";
-constexpr float confidenceThreshold = 0.5f;
 
 static const char *devName = "/dev/i2c-1";
 int16_t I2CFileStream;
