@@ -345,7 +345,6 @@ cv::Mat* LaneDetector::runCurvePipeline(cv::Mat& input)
    resize(input, image, cv::Size(), resizeRatio, resizeRatio);
    transformPerspective(image);
    convertToGrayscale(image);
-//   cv::imshow("gray", image);
 //   auto fittedPoints = fitLanePoints(calcLanePoints(image),image);
 //   image = cv::Mat::zeros(height, width, CV_8UC3);
 //   plotLanePoints(fittedPoints, image);

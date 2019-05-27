@@ -25,9 +25,11 @@ int16_t I2CFileStream;
 bool lightsOn = false;
 bool stopOn = false;
 
-void *arduinoI2CThread(void *ptr);
-void *laneDetectorThread(void *ptr);
-void *ssdDetectorThread(void *ptr);
+void getFrame();
+void showFrame();
+void detectLanes();
+void detectCars();
+void arduinoI2C();
 void exitRoutine (void);
 
 std::atomic<int16_t> speed;

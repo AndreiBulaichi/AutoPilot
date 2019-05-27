@@ -10,9 +10,9 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
+#include <thread>
 #include <mutex>
-#include "include/AutoPilotThreadOperations.h"
-#include "include/AutoPilotThreadOperations.cpp"
+#include <unistd.h>
 #include "include/AutoPilot.h"
 #include "include/DeltaTimer.h"
 #include "include/DeltaTimer.cpp"
@@ -23,35 +23,40 @@
 
 using namespace InferenceEngine;
 
-cv::VideoCapture cap;
-mutex capMutex;
+cv::VideoCapture cap(0);
+const size_t width  = (size_t) cap.get(cv::CAP_PROP_FRAME_WIDTH);
+const size_t height = (size_t) cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+cv::Mat frame(height, width, CV_8UC3);
 
-int main(int argc, char *argv[])
+mutex frameMtx;
+mutex imShowMtx;
+
+
+int main()
 {
-    std::cout << cv::getBuildInformation() << std::endl;
-
-    if (!cap.open(0)) {
+    if (!cap.isOpened()) {
         throw std::logic_error("Cannot open input file or camera");
         return -1;
     }
 
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, 320);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, 240);
+    // if size is updated need also to update global sizes
+    // cap.set(cv::CAP_PROP_FRAME_WIDTH, 320);
+    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, 240);
 
-    vector<void * (*)(void *)> threadRoutines =
-    {
-        laneDetectorThread,
-        // arduinoI2CThread,
-        ssdDetectorThread
-    };
+    std::cout << cv::getBuildInformation() << std::endl;
+    std::cout << "InferenceEngine: " << GetInferenceEngineVersion() << std::endl;
 
-    vector<pthread_t> threads(threadRoutines.size());
-    vector<int> threadsCreationResults(threadRoutines.size());
-    createAllThreads(threadRoutines, threads, threadsCreationResults);
-    printThreadsCreationResults(threadRoutines, threadsCreationResults);
-    joinThreads(threads);
+    std::thread getFrameTh(getFrame);
+    std::thread showFrameTh(showFrame);
+    std::thread detectLanesTh(detectLanes);
+    std::thread detectCarsTh(detectCars);
+
+    getFrameTh.join();
+    showFrameTh.join();
+    detectLanesTh.join();
+    detectCarsTh.join();
+
     atexit(exitRoutine);
-
     return 0;
 }
 
@@ -63,32 +68,92 @@ void frameToBlob(const cv::Mat& frame, InferRequest::Ptr& inferRequest,
     matU8ToBlob<uint8_t>(frame, frameBlob);
 }
 
-/*
- * Operational threads
- */
-
-void *ssdDetectorThread(void *ptr)
+void getFrame()
 {
-    try {
+    DeltaTimer timer;
+    cv::Mat frameBuffer(height, width, CV_8UC3);
 
-    std::cout << "InferenceEngine: " << GetInferenceEngineVersion() << std::endl;
-    slog::info << "Reading input" << slog::endl;
-    
-    capMutex.lock();
-    const size_t width  = (size_t) cap.get(cv::CAP_PROP_FRAME_WIDTH);
-    const size_t height = (size_t) cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+    while(true)
+    {
+        timer.resetDeltaTimer();
+        cap >> frameBuffer;
 
-    // read input (video) frame
-    cv::Mat curr_frame;  cap >> curr_frame;
-    cv::Mat next_frame;
+        frameMtx.lock();
+        frame = frameBuffer.clone();
+        frameMtx.unlock();
 
-    if (!cap.grab()) {
-        throw std::logic_error("This app supports only video (or camera) inputs !!! "
-                               "Failed getting next frame");
+        std::cout << "Capture FPS : " 
+                  << 1 / ((float)timer.getDeltaTimeMs() / 1000) 
+                  << std::endl;
     }
-    capMutex.unlock();
-    // -----------------------------------------------------------------------------------------------------
+}
 
+void showFrame()
+{
+    cv::Mat frameCpy(height, width, CV_8UC3);
+
+    string fpsMesage = "";
+
+    while(true)
+    {
+        frameMtx.lock();
+        frameCpy = frame.clone();
+        frameMtx.unlock();
+
+        if(!frameCpy.empty())
+        {
+            imShowMtx.lock();
+            cv::imshow("frame", frameCpy);
+            cv::waitKey(1);
+            imShowMtx.unlock();
+        }
+        usleep(1000);
+    }
+}
+
+void detectLanes()
+{
+    DeltaTimer timer;
+    cv::Mat frameCpy(height, width, CV_8UC3);
+    LaneDetector laneDetector(1, width, height);
+
+    string fpsMesage = "";
+    
+    while(true)
+    {
+        timer.resetDeltaTimer();
+
+        frameMtx.lock();
+        frameCpy = frame.clone();
+        frameMtx.unlock();
+
+        if(!frameCpy.empty())
+        {
+
+            cv::Mat image = *(laneDetector.runCurvePipeline(frame));
+            steer = floor(laneDetector.getSteeringAngle()) + 50;
+
+            cv::putText(image, fpsMesage, cv::Point2f(0, 75), cv::FONT_HERSHEY_PLAIN, 1.5,
+                            cv::Scalar(255, 0, 0));
+
+            imShowMtx.lock();
+            cv::imshow("Lane", image);
+            cv::waitKey(1);
+            imShowMtx.unlock();
+        }
+
+        // Need to sincronize in order to not process the same frame
+        usleep(30000);
+        fpsMesage =  "Lane detection FPS : " 
+          + std::to_string(1 / ((float)timer.getDeltaTimeMs() / 1000));
+    }
+}
+
+void detectCars()
+{
+    cv::Mat frameCpy(height, width, CV_8UC3);
+
+    try {
     // --------------------------- 1. Load Plugin for inference engine -------------------------------------
     slog::info << "Loading plugin" << slog::endl;
     InferencePlugin plugin = PluginDispatcher().getPluginByDevice(deviceName);
@@ -160,16 +225,11 @@ void *ssdDetectorThread(void *ptr)
     // -----------------------------------------------------------------------------------------------------
 
     // --------------------------- 5. Create infer request -------------------------------------------------
-    InferRequest::Ptr async_infer_request_next = network.CreateInferRequestPtr();
     InferRequest::Ptr async_infer_request_curr = network.CreateInferRequestPtr();
     // -----------------------------------------------------------------------------------------------------
 
     // --------------------------- 6. Do inference ---------------------------------------------------------
     slog::info << "Start inference " << slog::endl;
-
-    bool isLastFrame = false;
-    bool isAsyncMode = true;  // execution is always started using SYNC mode
-    bool isModeChanged = false;  // set to TRUE when execution mode is changed (SYNC<->ASYNC)
 
     typedef std::chrono::duration<double, std::ratio<1, 1000>> ms;
     auto total_t0 = std::chrono::high_resolution_clock::now();
@@ -177,135 +237,90 @@ void *ssdDetectorThread(void *ptr)
     double ocv_decode_time = 0, ocv_render_time = 0;
 
     std::cout << "To close the application, press 'CTRL+C' or any key with focus on the output window" << std::endl;
-    while (true) {
+    while (true) 
+    {
         auto t0 = std::chrono::high_resolution_clock::now();
-        // Here is the first asynchronous point:
-        // in the async mode we capture frame to populate the NEXT infer request
-        // in the regular mode we capture frame to the CURRENT infer request
-        
-        capMutex.lock();
-        if (!cap.read(next_frame)) {
-            if (next_frame.empty()) {
-                isLastFrame = true;  // end of video file
-            } else {
-                throw std::logic_error("Failed to get frame from cv::VideoCapture");
-            }
-        }
-        capMutex.unlock();
-
-        if (isAsyncMode) {
-            if (isModeChanged) {
-                frameToBlob(curr_frame, async_infer_request_curr, inputName);
-            }
-            if (!isLastFrame) {
-                frameToBlob(next_frame, async_infer_request_next, inputName);
-            }
-        } else if (!isModeChanged) {
-            frameToBlob(curr_frame, async_infer_request_curr, inputName);
-        }
-
         auto t1 = std::chrono::high_resolution_clock::now();
-        ocv_decode_time = std::chrono::duration_cast<ms>(t1 - t0).count();
 
-        t0 = std::chrono::high_resolution_clock::now();
-        // Main sync point:
-        // in the truly Async mode we start the NEXT infer request, while waiting for the CURRENT to complete
-        // in the regular mode we start the CURRENT request and immediately wait for it's completion
-        if (isAsyncMode) {
-            if (isModeChanged) {
-                async_infer_request_curr->StartAsync();
-            }
-            if (!isLastFrame) {
-                async_infer_request_next->StartAsync();
-            }
-        } else if (!isModeChanged) {
-            async_infer_request_curr->StartAsync();
-        }
+        frameMtx.lock();
+        frameCpy = frame.clone();
+        frameMtx.unlock();
 
-        if (OK == async_infer_request_curr->Wait(IInferRequest::WaitMode::RESULT_READY)) {
+        if(!frameCpy.empty())
+        {
+            frameToBlob(frameCpy, async_infer_request_curr, inputName);
             t1 = std::chrono::high_resolution_clock::now();
-            ms detection = std::chrono::duration_cast<ms>(t1 - t0);
-
+            ocv_decode_time = std::chrono::duration_cast<ms>(t1 - t0).count();
             t0 = std::chrono::high_resolution_clock::now();
-            ms wall = std::chrono::duration_cast<ms>(t0 - wallclock);
-            wallclock = t0;
+            async_infer_request_curr->StartAsync();
 
-            t0 = std::chrono::high_resolution_clock::now();
-            std::ostringstream out;
-            out << "OpenCV cap/render time: " << std::fixed << std::setprecision(2)
-                << (ocv_decode_time + ocv_render_time) << " ms";
-            cv::putText(curr_frame, out.str(), cv::Point2f(0, 25), cv::FONT_HERSHEY_TRIPLEX, 0.6, cv::Scalar(0, 255, 0));
-            out.str("");
-            out << "Wallclock time " << (isAsyncMode ? "(TRUE ASYNC):      " : "(SYNC, press Tab): ");
-            out << std::fixed << std::setprecision(2) << wall.count() << " ms (" << 1000.f / wall.count() << " fps)";
-            cv::putText(curr_frame, out.str(), cv::Point2f(0, 50), cv::FONT_HERSHEY_TRIPLEX, 0.6, cv::Scalar(0, 0, 255));
-            if (!isAsyncMode) {  // In the true async mode, there is no way to measure detection time directly
+            if (OK == async_infer_request_curr->Wait(IInferRequest::WaitMode::RESULT_READY)) 
+            {
+                t1 = std::chrono::high_resolution_clock::now();
+                ms detection = std::chrono::duration_cast<ms>(t1 - t0);
+
+                t0 = std::chrono::high_resolution_clock::now();
+                ms wall = std::chrono::duration_cast<ms>(t0 - wallclock);
+                wallclock = t0;
+
+                t0 = std::chrono::high_resolution_clock::now();
+                std::ostringstream out;
+                out << "OpenCV cap/render time: " << std::fixed << std::setprecision(2)
+                    << (ocv_decode_time + ocv_render_time) << " ms";
+                cv::putText(frameCpy, out.str(), cv::Point2f(0, 25), cv::FONT_HERSHEY_PLAIN, 1.5, cv::Scalar(0, 255, 0));
+                out.str("");
+                out << "Wallclock time ";
+                out << std::fixed << std::setprecision(2) << wall.count() << " ms (" << 1000.f / wall.count() << " fps)";
+                cv::putText(frameCpy, out.str(), cv::Point2f(0, 50), cv::FONT_HERSHEY_PLAIN, 1.5, cv::Scalar(0, 0, 255));
                 out.str("");
                 out << "Detection time  : " << std::fixed << std::setprecision(2) << detection.count()
                     << " ms ("
                     << 1000.f / detection.count() << " fps)";
-                cv::putText(curr_frame, out.str(), cv::Point2f(0, 75), cv::FONT_HERSHEY_TRIPLEX, 0.6,
+                cv::putText(frameCpy, out.str(), cv::Point2f(0, 75), cv::FONT_HERSHEY_PLAIN, 1.5,
                             cv::Scalar(255, 0, 0));
-            }
 
-            // ---------------------------Process output blobs--------------------------------------------------
-            // Processing results of the CURRENT request
-            const float *detections = async_infer_request_curr->GetBlob(outputName)->buffer().as<PrecisionTrait<Precision::FP32>::value_type*>();
-            for (int i = 0; i < maxProposalCount; i++) {
-                float image_id = detections[i * objectSize + 0];
-                if (image_id < 0) {
-                    // std::cout << "Only " << i << " proposals found" << std::endl;
-                    break;
+                // ---------------------------Process output blobs--------------------------------------------------
+                // Processing results of the CURRENT request
+                const float *detections = async_infer_request_curr->GetBlob(outputName)->buffer().as<PrecisionTrait<Precision::FP32>::value_type*>();
+                for (int i = 0; i < maxProposalCount; i++) {
+                    float image_id = detections[i * objectSize + 0];
+                    if (image_id < 0) {
+                        break;
+                    }
+
+                    float confidence = detections[i * objectSize + 2];
+                    auto label = static_cast<int>(detections[i * objectSize + 1]);
+                    float xmin = detections[i * objectSize + 3] * width;
+                    float ymin = detections[i * objectSize + 4] * height;
+                    float xmax = detections[i * objectSize + 5] * width;
+                    float ymax = detections[i * objectSize + 6] * height;
+
+                    if (confidence > confidenceThreshold) {
+                        /** Drawing only objects when > confidence_threshold probability **/
+                        std::ostringstream conf;
+                        conf << ":" << std::fixed << std::setprecision(3) << confidence;
+                        cv::putText(frameCpy,
+                                    (static_cast<size_t>(label) < labels.size() ?
+                                    labels[label] : std::string("label #") + std::to_string(label)) + conf.str(),
+                                    cv::Point2f(xmin, ymin - 5), cv::FONT_HERSHEY_COMPLEX_SMALL, 1,
+                                    cv::Scalar(0, 0, 255));
+                        cv::rectangle(frameCpy, cv::Point2f(xmin, ymin), cv::Point2f(xmax, ymax), cv::Scalar(0, 0, 255));
+                    }
                 }
 
-                float confidence = detections[i * objectSize + 2];
-                auto label = static_cast<int>(detections[i * objectSize + 1]);
-                float xmin = detections[i * objectSize + 3] * width;
-                float ymin = detections[i * objectSize + 4] * height;
-                float xmax = detections[i * objectSize + 5] * width;
-                float ymax = detections[i * objectSize + 6] * height;
-
-                if (confidence > confidenceThreshold) {
-                    /** Drawing only objects when > confidence_threshold probability **/
-                    std::ostringstream conf;
-                    conf << ":" << std::fixed << std::setprecision(3) << confidence;
-                    cv::putText(curr_frame,
-                                (static_cast<size_t>(label) < labels.size() ?
-                                labels[label] : std::string("label #") + std::to_string(label)) + conf.str(),
-                                cv::Point2f(xmin, ymin - 5), cv::FONT_HERSHEY_COMPLEX_SMALL, 1,
-                                cv::Scalar(0, 0, 255));
-                    cv::rectangle(curr_frame, cv::Point2f(xmin, ymin), cv::Point2f(xmax, ymax), cv::Scalar(0, 0, 255));
-                }
             }
-        }
-        cv::imshow("Detection results", curr_frame);
+
+        }        
 
         t1 = std::chrono::high_resolution_clock::now();
         ocv_render_time = std::chrono::duration_cast<ms>(t1 - t0).count();
 
-        if (isLastFrame) {
-            break;
-        }
-
-        if (isModeChanged) {
-            isModeChanged = false;
-        }
-
-        // Final point:
-        // in the truly Async mode we swap the NEXT and CURRENT requests for the next iteration
-        curr_frame = next_frame;
-        next_frame = cv::Mat();
-        if (isAsyncMode) {
-            async_infer_request_curr.swap(async_infer_request_next);
-        }
-
+        imShowMtx.lock();
+        cv::imshow("Detection results", frameCpy);
         const int key = cv::waitKey(1);
         if (27 == key)  // Esc
             break;
-        if (9 == key) {  // Tab
-            isAsyncMode ^= true;
-            isModeChanged = true;
-        }
+        imShowMtx.unlock();
     }
     // -----------------------------------------------------------------------------------------------------
     auto total_t1 = std::chrono::high_resolution_clock::now();
@@ -314,53 +329,19 @@ void *ssdDetectorThread(void *ptr)
     }
     catch (const std::exception& error) {
         std::cerr << "[ ERROR ] " << error.what() << std::endl;
-        return nullptr;
+        return;
     }
     catch (...) {
         std::cerr << "[ ERROR ] Unknown/internal exception happened." << std::endl;
-        return nullptr;
+        return;
     }
 
     slog::info << "Execution successful" << slog::endl;
 
-    return nullptr;
+    return;
 }
 
-void *laneDetectorThread(void *ptr)
-{
-    DeltaTimer timer;
-    timer.resetDeltaTimer();
-
-    capMutex.lock();
-    if (!cap.isOpened())
-      return nullptr;
-    cv::Mat frame;
-    cap >> frame;
-    capMutex.unlock();
-
-    LaneDetector laneDetector(1, frame.cols, frame.rows);
-
-    while (!frame.empty()) {
-      timer.resetDeltaTimer();
-
-      cv::Mat image = *(laneDetector.runCurvePipeline(frame));
-      steer = floor(laneDetector.getSteeringAngle()) + 50;
-      std::cout << "steer " <<std::dec<<(int) steer << std::endl;
-      cv::imshow("Lane", image);
-
-      if(cv::waitKey(1) >= 0)
-          break;
-
-      capMutex.lock();
-      cap >> frame;
-      capMutex.unlock();
-      std::cout << "FPS : " << 1 / ((float)timer.getDeltaTimeMs() / 1000) << std::endl;
-    }
-
-    return nullptr;
-}
-
-void *arduinoI2CThread(void *ptr)
+void arduinoI2C()
 {
     DeltaTimer timer;
     timer.resetDeltaTimer();
@@ -427,7 +408,7 @@ void *arduinoI2CThread(void *ptr)
             #endif
         }
     }
-    return nullptr;
+    return;
 }
 
 int8_t constrainValue(int8_t val, int8_t a, int8_t b)
