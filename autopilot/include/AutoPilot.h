@@ -26,6 +26,7 @@ bool stopOn = false;
 void getFrame();
 void showFrame();
 void detectLanes();
+void detectTraffic();
 void detectCars();
 void arduinoI2C();
 void exitRoutine (void);
